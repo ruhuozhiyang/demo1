@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<style>
+        body {
+        display: flex;
+        height: 100vh;
+        margin: 0;
+        align-items: center;
+        justify-content: center;
+        padding: 0 50px;
+        font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+        }
+        video {
+        max-width: calc(50% - 100px);
+        margin: 0 50px;
+        box-sizing: border-box;
+        border-radius: 2px;
+        padding: 0;
+        box-shadow: rgba(156, 172, 172, 0.2) 0px 2px 2px, rgba(156, 172, 172, 0.2) 0px 4px 4px, rgba(156, 172, 172, 0.2) 0px 8px 8px, rgba(156, 172, 172, 0.2) 0px 16px 16px, rgba(156, 172, 172, 0.2) 0px 32px 32px, rgba(156, 172, 172, 0.2) 0px 64px 64px;
+        }
+        .copy {
+        position: fixed;
+        top: 10px;
+        left: 50%;
+        transform: translateX(-50%);
+        font-size: 16px;
+        color: rgba(0, 0, 0);
+        }
+</style>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+    <script type="text/javascript" src="https://cdn.scaledrone.com/scaledrone.min.js"></script>
+</head>
+<body>
+    <div class="copy">Send your URL to a friend to start a video call</div>
+    <video id="localVideo" autoplay muted></video>
+    <video id="remoteVideo" autoplay></video>
+    <script>
+        // // 产生随机数
+        // if (!location.hash) {
+        //     location.hash = Math.floor(Math.random() * 0xFFFFFF).toString(16);
+        // }
+        // // 获取房间号
+        // var roomHash = location.hash.substring(1);
+
+        // 放置你自己的频道id, 这是我注册了ScaleDrone 官网后，创建的channel
+        // 你也可以自己创建
+        var drone = new ScaleDrone('87fYv4ncOoa0Cjne');
+        // 房间名必须以 'observable-'开头
+        // var roomName = 'observable-' + roomHash;
+        var roomName = 'observable-myroom';
+        var configuration = {
+            iceServers: [{
+                urls: 'stun:stun.l.google.com:19302' // 使用谷歌的stun服务
+            }]
+        };
+
+        var room;
+        var pc;
+        var candidatesOnQueue=[]
+        function onSuccess() {}
+
+        function onError(error) {
+            console.log(error);
+        }
+
+        drone.on('open', function(error){
+            if (error) { return console.error(error);}
+
+            room = drone.subscribe(roomName);
+            room.on('open', function(error){
+                if (error) {onError(error);}
+            });
+
+            // 已经链接到房间后，就会收到一个 members 数组，代表房间里的成员
+            // 这时候信令服务已经就绪
+            room.on('members', function(members){
+                console.log('MEMBERS', members);
+
+                // 如果你是第二个链接到房间的人，就会创建offer
+                var isOfferer = members.length === 2;
+                startWebRTC(isOfferer);
+            });
+        });
+
+        // 通过Scaledrone发送信令消息
+        function sendMessage(message) {
+            drone.publish({
+                room: roomName,
+                message
+            });
+        }
+
+        function startWebRTC(isOfferer) {
+            pc = new RTCPeerConnection(configuration);
+
+            // 当本地ICE Agent需要通过信号服务器发送信息到其他端时
+            // 会触发icecandidate事件回调
+            pc.onicecandidate = function(event){
+                if (event.candidate) {
+                    console.log("candidate")
+                    sendMessage({ 'candidate': event.candidate });
+                }
+            };
+
+            // 如果用户是第二个进入的人，就在negotiationneeded 事件后创建sdp
+            if (isOfferer) {
+                // onnegotiationneeded 在要求sesssion协商时发生
+                pc.onnegotiationneeded = function() {
+                    console.log("创建了offer")
+                    // 创建本地sdp描述 SDP (Session Description Protocol) session描述协议
+                    pc.createOffer().then(localDescCreated).catch(onError);
+                    if(candidatesOnQueue.length>0){
+                        candidatesOnQueue.forEach(function(c){
+                            pc.addIceCandidate(c).catch(error=>onError(error))
+                        })
+                    }
+                };
+            }
+
+            // 当远程数据流到达时，将数据流装载到video中
+                // pc.onaddstream = function(event){
+                //     // alert(event.stream)
+                //     remoteVideo.srcObject = event.stream;
+                // };
+            pc.ontrack = event => {
+                const stream = event.streams[0];
+                if (!remoteVideo.srcObject || remoteVideo.srcObject.id !== stream.id) {
+                remoteVideo.srcObject = stream;
+                }
+            };
+
+            // 获取本地媒体流
+            navigator.mediaDevices.getUserMedia({
+                audio: true,
+                video: true,
+            }).then( function(stream) {
+                // 将本地捕获的视频流装载到本地video中
+                localVideo.srcObject = stream;
+
+                // 将本地流加入RTCPeerConnection 实例中 发送到其他端
+                // pc.addStream(stream);
+                stream.getTracks().forEach(track => pc.addTrack(track, stream));
+            }, onError);
+
+            // 从Scaledrone监听信令数据
+            room.on('data', function(message, client){
+                // 消息是我自己发送的，则不处理
+                if (client.id === drone.clientId) {
+                    return;
+                }
+
+                if (message.sdp) {
+                    console.log("sdp")
+                    // 设置远程sdp, 在offer 或者 answer后
+                    pc.setRemoteDescription(new RTCSessionDescription(message.sdp), function(){
+                        // 当收到offer 后就接听
+                        if (pc.remoteDescription.type === 'offer') {
+                            pc.createAnswer().then(localDescCreated).catch(onError);
+                        }
+                    }, onError);
+                    if(candidatesOnQueue.length>0){
+                        console.log("遍历")
+                        candidatesOnQueue.forEach(function(c){
+                            pc.addIceCandidate(c).catch(error=>onError(error))
+                        })
+                    }
+                }
+                else if (message.candidate) {
+                    console.log(message.candidate)
+                    // 增加新的 ICE canidatet 到本地的链接中
+                    if(!pc||!pc.remoteDescription){
+                        candidatesOnQueue.push(message.candidate)
+                    }else{
+                        pc.addIceCandidate(new RTCIceCandidate(message.candidate), onSuccess, onError);
+                    }
+                }
+            });
+        }
+
+        function localDescCreated(desc) {
+            pc.setLocalDescription(desc, function(){
+                sendMessage({ 'sdp': pc.localDescription });
+            },onError);
+        }
+
+
+    </script>
+</body>
+</html>
